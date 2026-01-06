@@ -1,7 +1,12 @@
 # Structure from Motion
 
-This repository contains implementation of Structure from Motion (SfM) approach for estimating camera poses and 3D landmarks from a set of cameras with known intrinsics. The solution is wrapped a ROS2 node and camera poses and estimated point cloud are visualized in **RViz2**.
+<p align="center">
+  <img src="images/sfm.png" width="600">
+  <br>
+  <em>Poses of five cameras from the small_dataset and the obtained point cloud – resolving issues related to bundle adjustment and PnP should yield better results.</em>
+</p>
 
+This repository contains an implementation of a Structure from Motion (SfM) approach for estimating camera poses and 3D landmarks from a set of cameras with known intrinsics. The solution is wrapped in a ROS2 node, and camera poses and the estimated point cloud are visualized in **RViz2**.
 
 ## Running the Code
 
@@ -30,27 +35,30 @@ ros2 run sfm sfm_node
 ```bash
 ros2 run rviz2 rviz2
 ```
-Execute following command to publish transformation from map to wrold coordinate frame (enables proper visualization);
+
+Execute the following command to publish the transformation from the map to the world coordinate frame (enables proper visualization):
+
 ```bash
 ros2 run tf2_ros static_transform_publisher 0 0 0 0 0 -1.5708 map world
 ```
 
 ## Implementation Details
 
-As mentioned before, the program expects a set of images depicting the same scene with known camera intrinsics. Each image is then processed sequentially and its pose is computed and 3D points appended to the existing point cloud. The complete processing pipeline is:
-1. Train a DBoW2 bag of words database - enables efficient retrieval of top k similar images to the query image.
-2. Randomly choose the first image. Additionally, using previously trained database, find the most similar image to the first selected image.
-3. Estimate relative motion between the two images using epipolar geometry, this step involves following:
-   - detect and match features between the two images
-   - estimate the Essential matrix using RANSAC
-   - decompose the Essential matrix in a rotation matrix and a translation vector
-   - with a known pose, triangulate matches and obtain initial point cloud
-4. For all the remaining images, do following:
-   - using trained databse, find the most similar image to the previously processed one
-   - with the known 3D-2D correspondances, find pose of the new image using PnP
-   - match features between newely added image and all previosuly processed images - triangulate the matches and add them to the point cloud
+As mentioned before, the program expects a set of images depicting the same scene with known camera intrinsics. Each image is processed sequentially, its pose is estimated, and newly reconstructed 3D points are appended to the existing point cloud. The complete processing pipeline is as follows:
 
+1. Train a DBoW2 bag-of-words database to enable efficient retrieval of the top-k most similar images to a query image.
+2. Randomly choose the first image. Additionally, using the previously trained database, find the most similar image to the initially selected image.
+3. Estimate the relative motion between the two images using epipolar geometry. This step involves:
+   - detecting and matching features between the two images
+   - estimating the Essential matrix using RANSAC
+   - decomposing the Essential matrix into a rotation matrix and a translation vector
+   - triangulating matched features with the known pose to obtain an initial point cloud
+4. For all remaining images, perform the following steps:
+   - using the trained database, find the most similar image to the previously processed one
+   - estimate the pose of the new image using PnP with known 3D–2D correspondences
+   - match features between the newly added image and all previously processed images, triangulate the matches, and add them to the point cloud
 
 ## TODO
-- Correctly integrate bundle adjustment into the pipeline - it is implemented using **g2o** library, but there is bug.
-- Fix bug related to PnP - number of valid 3D-2D correspondances entering the PnP procedure rapidly decreases as more images is being processed. 
+
+- Correctly integrate bundle adjustment into the pipeline – it is implemented using the **g2o** library, but there is currently a bug.
+- Fix a bug related to PnP – the number of valid 3D–2D correspondences entering the PnP procedure rapidly decreases as more images are processed.
