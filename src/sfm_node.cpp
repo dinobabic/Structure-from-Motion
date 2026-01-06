@@ -6,10 +6,14 @@
 
 #include <DBoW2/DBoW2.h>
 #include <sophus/se3.hpp>
-#include <unordered_map.hpp>
 
 #include "sfm/sfm.hpp"
 #include "sfm/bundle_adjustment.hpp"
+
+/*
+    PUBLISH THIS TRANSFORM from world to map
+    ros2 run tf2_ros static_transform_publisher 0 0 0 0 0 -1.5708 map world
+*/
 
 const std::string dataset_path = DATASET_PATH; // DATASET_PATH is defined in CMakeLists.txt
 
@@ -21,23 +25,34 @@ public:
                 sfm(dataset_path),
                 img_names(get_image_names(dataset_path)),
                 imgs(load_imgs(img_names)),
-                img_descriptors(get_image_descriptors(imgs)),
                 K(read_calib_matrix(dataset_path + "/K.txt"))
     {   
+        Eigen::Matrix3f R_cv_to_ros;
+        R_cv_to_ros <<
+            -1,  0,  0,
+            0,  -1,  0,
+            0,   0,  1;
+        Sophus::SE3f pose_cv_to_ros(R_cv_to_ros, Eigen::Vector3f::Zero());
+
         point_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("points", 10);
         cameras_pub = this->create_publisher<visualization_msgs::msg::MarkerArray>("cameras", 10);
 
         int N = imgs.size();
+        Sophus::SE3f T_1W(Eigen::Matrix3f::Identity(), Eigen::Vector3f::Zero()); // pose of the world in the first camera
+        
+        poses.push_back(T_1W);
+        poses_visualization.push_back(pose_cv_to_ros*T_1W);
 
         // load DBoW2 database
         db = OrbDatabase(dataset_path + "/db.yml.gz");
 
         // populate the databse with descriptors
+        auto img_descriptors = get_image_descriptors(imgs);
         for (size_t i = 0; i < img_descriptors.size(); i++)
             db.add(img_descriptors[i]);
 
         
-        for (int i = 0; i < N; i++)
+        for (int i = 0; i < N-1; i++)
         {
             int best_match_id;
             int query_img_id;
@@ -46,68 +61,101 @@ public:
                 // 2D-2D motion between two first images
                 query_img_id = 0;               
                 visited_frames.insert(query_img_id);
-                processed_imgs.push_back(query_img_id);
 
                 // find the most similar image to the query img
                 best_match_id = retrieve_best_match(db, img_descriptors[query_img_id], visited_frames);
                 std::cout << "The most similar image to image " << img_names[query_img_id] << " is image " << img_names[best_match_id] << std::endl;
                 visited_frames.insert(best_match_id);
-                processed_imgs.push_back(best_match_id);
 
                 // compute the relative motion between two frames using epipolar geometry
                 Eigen::Matrix3f R;
                 Eigen::Vector3f t;
+                ImageDescription img_description1, img_description2;
+                img_description1.img_id = query_img_id;
+                img_description2.img_id = best_match_id;
+
                 sfm.motion_2D2D(
-                    query_img_id,
-                    best_match_id,
                     imgs[query_img_id], 
                     imgs[best_match_id], 
+                    img_description1,
+                    img_description2,
                     points3D, 
                     observations,
                     R, t
                 );
 
-                Sophus::SE3f T_1W(Eigen::Matrix3f::Identity(), Eigen::Vector3f::Zero()); // pose of the world in the first camera
-                Sophus::SE3f T_21(R, t); // pose of the first camera in the second camera
-
-                poses.push_back(T_1W);
-                poses.push_back(T_21 * T_1W); // pose of the world in the second camera  
+                image_descriptions.push_back(img_description1);
+                image_descriptions.push_back(img_description2);
+                
+                Sophus::SE3f T_2W(R, t); // pose of the first camera in the second camera
+                poses.push_back(T_2W); // pose of the world in the second camera  
                 
                 // perform bundle adjustment
-                solve_bundle_adjustment(poses, points3D, observations, K);
+                //solve_bundle_adjustment(poses, points3D, observations, K);
+                poses_visualization.push_back(pose_cv_to_ros*poses.back());
+
+                colorize_points(
+                    cv::imread(img_names[query_img_id], cv::IMREAD_COLOR), 
+                    cv::imread(img_names[best_match_id], cv::IMREAD_COLOR), 
+                    colors, points3D.size(),
+                    points3D,
+                    K,
+                    poses[0],
+                    poses[1]
+                );
             }   
             else
             {
                 // 3D-2D motion between point cloud and image
-                query_img_id = processed_imgs.back(); // query image is the last processed image
+                query_img_id = image_descriptions.back().img_id; // query image is the last processed image
                 best_match_id = retrieve_best_match(db, img_descriptors[query_img_id], visited_frames);
                 std::cout << "The most similar image to image " << img_names[query_img_id] << " is image " << img_names[best_match_id] << std::endl;
                 visited_frames.insert(best_match_id);
-                processed_imgs.push_back(best_match_id);
                 
                 // compute the relative motion between two cameras using PnP
                 Eigen::Matrix3f R;
                 Eigen::Vector3f t;
+                ImageDescription img_description;
+                img_description.img_id = best_match_id;
+
                 sfm.motion_3D2D(
-                    query_img_id,
-                    best_match_id,
-                    imgs[query_img_id], 
-                    imgs[best_match_id], 
+                    imgs[best_match_id],
+                    img_description, 
+                    image_descriptions.back(), 
                     points3D, 
                     observations,
                     R, t
                 );
 
-                break;
+                image_descriptions.push_back(img_description);
+                
+                Sophus::SE3f T_NW(R, t); // pose of the world in the n-th camera
+                poses.push_back(T_NW); 
+                
+                int m = points3D.size(); // number of 3D points before triangulating new
+                sfm.triangulate_new_matches(image_descriptions[i-1], img_description, poses[i-1], poses[i], points3D, observations);
+
+                std::cout << "Pose of the third camera before ba: \n" << poses.back().matrix3x4() << std::endl;
+                
+                // perform bundle adjustment
+                //solve_bundle_adjustment(poses, points3D, observations, K);
+                poses_visualization.push_back(pose_cv_to_ros*poses.back());
+
+                std::cout << "Pose of the third camera after ba: \n" << poses.back().matrix3x4() << std::endl;
+
+                colorize_points(
+                    cv::imread(img_names[i-1], cv::IMREAD_COLOR), 
+                    cv::imread(img_names[best_match_id], cv::IMREAD_COLOR), 
+                    colors, points3D.size() - m,
+                    points3D,
+                    K,
+                    poses[i-1],
+                    poses[i]
+                );
             }
-            
-            auto colors = colorize_points(cv::imread(img_names[0], cv::IMREAD_COLOR), 
-                                    cv::imread(img_names[best_match_id], cv::IMREAD_COLOR), 
-                                    points3D,
-                                    K,
-                                    poses[0],
-                                    poses[1]);
-            point_cloud_pub->publish(point_cloud_to_message(points3D, colors));
+
+            std::cout << "The number of points in point cloud: " << points3D.size() << std::endl;
+            point_cloud_pub->publish(point_cloud_to_message());
             publish_camera_poses();
         }
     }   
@@ -116,9 +164,13 @@ private:
     SfM sfm;
     OrbDatabase db;
     std::unordered_set<int> visited_frames;
-    std::vector<int> processed_imgs; // the order in which images have been processed
-    std::vector<Sophus::SE3f, Eigen::aligned_allocator<Sophus::SE3f>> poses; // pose of each camera in the world frame
+
+    // opencv and ros2 use different convention for coordinate frames - check rotation matrix
+    std::vector<Sophus::SE3f, Eigen::aligned_allocator<Sophus::SE3f>> poses; // pose of each camera in the world frame - opencv
+    std::vector<Sophus::SE3f, Eigen::aligned_allocator<Sophus::SE3f>> poses_visualization; // pose of each camera in the world frame - ros2
+
     std::vector<Eigen::Vector3f> points3D; // 3D points expressed in the coordinate system of the first frame
+    std::vector<Eigen::Vector3f> colors; // color of each 3D point in cloud
     std::vector<Observation> observations; // for each 3D point, we must know to which camera and what 2D point it projects to
     Eigen::Matrix3f K;
 
@@ -127,19 +179,18 @@ private:
 
     std::vector<std::string> img_names;
     std::vector<cv::Mat> imgs;
-    std::vector<std::vector<cv::Mat>> img_descriptors;
+    std::vector<ImageDescription> image_descriptions;
 
     void publish_camera_poses()
     {
         visualization_msgs::msg::MarkerArray camera_array;
         for (size_t i = 0; i < poses.size(); i++)
         {   
-            auto pose = poses[i];
+            auto pose = poses_visualization[i];
 
             visualization_msgs::msg::Marker marker;
-            marker.header.frame_id = "map";
+            marker.header.frame_id = "world";
             marker.header.stamp = this->get_clock()->now();
-            marker.ns = "cameras";
             marker.id = i;
             marker.type = visualization_msgs::msg::Marker::LINE_LIST;
             marker.action = visualization_msgs::msg::Marker::ADD;
@@ -183,15 +234,14 @@ private:
         cameras_pub->publish(camera_array);
     }
 
-    sensor_msgs::msg::PointCloud2 point_cloud_to_message(const std::vector<Eigen::Vector3f> &points3D,
-                                                        const std::vector<Eigen::Vector3f> &colors)
+    sensor_msgs::msg::PointCloud2 point_cloud_to_message()
     {
         sensor_msgs::msg::PointCloud2 msg;
         msg.height = 1;
         msg.width = points3D.size();
         msg.is_dense = true;
         msg.is_bigendian = false;
-        msg.header.frame_id = "map";
+        msg.header.frame_id = "world";
         msg.header.stamp = this->get_clock()->now();
 
         sensor_msgs::PointCloud2Modifier modifier(msg);

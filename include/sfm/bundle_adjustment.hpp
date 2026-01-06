@@ -133,7 +133,7 @@ void solve_bundle_adjustment(
     optimizer.setAlgorithm(solver);
     optimizer.setVerbose(false);
 
-    std::vector<VertexPose*> vertex_pose_intrinsics;
+    std::vector<VertexPose*> vertex_pose;
     std::vector<VertexPoint*> vertex_points;
 
     // add alll cameras to the optimization problem
@@ -151,7 +151,7 @@ void solve_bundle_adjustment(
             v->setFixed(true); // do not optimize first camera - always identity
         
         optimizer.addVertex(v);
-        vertex_pose_intrinsics.push_back(v);
+        vertex_pose.push_back(v);
     }
 
     // add all points to the optimization problem
@@ -170,7 +170,7 @@ void solve_bundle_adjustment(
     {
         auto observation = observations[i];
         EdgeProjection *edge = new EdgeProjection();
-        edge->setVertex(0, vertex_pose_intrinsics[observation.camera_id]);
+        edge->setVertex(0, vertex_pose[observation.camera_id]);
         edge->setVertex(1, vertex_points[observation.point_id]);
         edge->setMeasurement(observation.p);
         edge->setInformation(Eigen::Matrix2d::Identity());
@@ -179,12 +179,12 @@ void solve_bundle_adjustment(
     }
 
     optimizer.initializeOptimization();
-    optimizer.optimize(5);
+    optimizer.optimize(20);
 
     // update optimized variables
-    for (i = 0; i < vertex_pose_intrinsics.size(); i++)
+    for (i = 0; i < vertex_pose.size(); i++)
     {
-        auto v = vertex_pose_intrinsics[i];
+        auto v = vertex_pose[i];
         auto estimate = v->estimate();
         camera_poses[i] = Sophus::SE3f(estimate.R, estimate.t);
     }
