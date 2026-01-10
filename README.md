@@ -1,4 +1,4 @@
-# Structure from Motion - test
+# Structure from Motion
 
 <p align="center">
   <img src="images/sfm.png" width="600">
